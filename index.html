@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Rat vs. Swarm</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000; 
+            font-family: sans-serif; 
+            user-select: none;
+        }
+        #game-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;
+        }
+        
+        /* UI and Overlays */
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); color: white; display: flex;
+            flex-direction: column; justify-content: center; align-items: center;
+            z-index: 20; text-align: center;
+        }
+        #start-screen h1 { font-size: 60px; margin-bottom: 10px; color: #FFD700; }
+        #start-screen p { font-size: 24px; color: #aaa; margin-bottom: 30px; }
+        .blink { animation: blinker 1.5s linear infinite; font-weight: bold; font-size: 20px; }
+        @keyframes blinker { 50% { opacity: 0; } }
+
+        #ui-container {
+            position: absolute; bottom: 0; left: 0; width: 100%;
+            background: rgba(0, 0, 0, 0.85); color: #fff;
+            padding: 10px 20px; box-sizing: border-box;
+            border-top: 2px solid #444; display: none; /* Hidden until start */
+            justify-content: space-between; align-items: center; z-index: 10;
+        }
+        
+        #rules { font-size: 13px; color: #bbb; max-width: 45%; line-height: 1.4; }
+        .highlight { color: #FFD700; }
+        
+        #controls { display: flex; align-items: center; gap: 10px; font-weight: bold; }
+        button { 
+            background: #333; color: white; border: 1px solid #555; 
+            padding: 5px 15px; font-size: 16px; cursor: pointer; border-radius: 4px;
+        }
+        button:hover { background: #555; }
+
+        #stats { font-size: 20px; font-weight: bold; text-align: right; color: #fff; }
+        #status-display { font-size: 16px; color: #aaa; display: block; margin-top: 4px; }
+        
+        #end-title { font-size: 50px; font-weight: bold; margin-bottom: 10px; }
+        #end-score { font-size: 30px; color: #FFD700; margin-bottom: 20px; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="game-container"></div>
+
+    <div id="start-screen" class="overlay">
+        <h1>RAT vs. SWARM</h1>
+        <p>Use W, A, S, D to move. Avoid the eyes.</p>
+        <div class="blink">PRESS ENTER TO START</div>
+    </div>
+
+    <div id="ui-container">
+        <div id="rules">
+            <strong>Goal:</strong> Collect <span class="highlight">ALL Cheese</span> and escape through the top.<br>
+            <strong>Score:</strong> Based on cheese collected, time taken, and lives remaining.
+        </div>
+        
+        <div id="controls">
+            Target Cheese: 
+            <button id="btn-sub">-</button>
+            <span id="target-cheese-display">1</span>
+            <button id="btn-add">+</button>
+        </div>
+
+        <div id="stats">
+            Time: <span id="time-display">0</span>s | Lives: <span id="lives-display">5</span><br>
+            <span id="status-display">Find 1 cheese!</span>
+        </div>
+    </div>
+
+    <div id="end-screen" class="overlay" style="display: none;">
+        <div id="end-title">GAME OVER</div>
+        <div id="end-score">Score: 0</div>
+        <div class="blink" style="color: #aaa; margin-top: 20px;">PRESS ENTER TO RESTART</div>
+    </div>
+
+<script>
+    // --- 3D SCENE SETUP ---
+    const container = document.getElementById('game-container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
+    
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 3000);
+    camera.position.set(0, 800, 600);
+    camera.lookAt(0, 0, 0);
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.appendChild(renderer.domElement);
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); 
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(100, 500, 100); 
+    scene.add(directionalLight);
+
+    const FIELD_SIZE = 800; const BOUND = FIELD_SIZE / 2; const OPENING_WIDTH = 120;
+    
+    // --- GAME STATE & VARIABLES ---
+    let gameState = "START"; // START, PLAYING, GAME_OVER, WIN
+    const keys = { w: false, a: false, s: false, d: false };
+    let startTime = 0;
+    let totalCheesesToSpawn = 1;
+    let cheesesCollected = 0;
+    
+    let cheeseObjects = [];
+    let eyeballs = [];
+    
+    // --- MATERIALS & ENVIRONMENT ---
+    const wallMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+    const floorMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
+    const ratMat = new THREE.MeshPhongMaterial({ color: 0xaaaaaa });
+    const cheeseMat = new THREE.MeshPhongMaterial({ color: 0xffd700, emissive: 0x443300 });
+    const whiteEyeMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+    const blueIrisMat = new THREE.MeshPhongMaterial({ color: 0x00bfff });
+    const blackPupilMat = new THREE.MeshPhongMaterial({ color: 0x000000 });
+    const auraMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+
+    // Static Floor & Walls
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE), floorMat);
+    floor.rotation.x = -Math.PI / 2; scene.add(floor);
+
+    const wallHeight = 40; const wallThickness = 20;
+    function createWall(w, d, x, z) {
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallHeight, d), wallMat);
+        wall.position.set(x, wallHeight/2, z); scene.add(wall);
+    }
+    createWall(wallThickness, FIELD_SIZE, -BOUND, 0);
+    createWall(wallThickness, FIELD_SIZE, BOUND, 0);
+    createWall(FIELD_SIZE, wallThickness, 0, BOUND);
+    const topWallWidth = (FIELD_SIZE - OPENING_WIDTH) / 2;
+    createWall(topWallWidth, wallThickness, -BOUND + topWallWidth/2, -BOUND);
+    createWall(topWallWidth, wallThickness, BOUND - topWallWidth/2, -BOUND);
+
+    const markerGeo = new THREE.CylinderGeometry(5, 5, wallHeight, 16);
+    const markerMat = new THREE.MeshPhongMaterial({ color: 0x00ff00, emissive: 0x004400 });
+    const marker1 = new THREE.Mesh(markerGeo, markerMat); marker1.position.set(-OPENING_WIDTH/2, wallHeight/2, -BOUND);
+    const marker2 = new THREE.Mesh(markerGeo, markerMat); marker2.position.set(OPENING_WIDTH/2, wallHeight/2, -BOUND);
+    scene.add(marker1); scene.add(marker2);
+
+    // Player Object
+    const player = {
+        mesh: new THREE.Mesh(new THREE.SphereGeometry(12, 32, 32), ratMat),
+        r: 12, speed: 4.5, lives: 5, isGlitching: false, glitchTimer: 0, dirX: 0, dirZ: 0
+    };
+    scene.add(player.mesh);
+
+    // --- GAME LOGIC FUNCTIONS ---
+    function spawnCheese() {
+        const c = {
+            mesh: new THREE.Mesh(new THREE.BoxGeometry(16, 16, 16), cheeseMat),
+            r: 15, x: (Math.random() - 0.5) * (FIELD_SIZE - 100), z: Math.random() * (BOUND - 50)
+        };
+        c.mesh.position.set(c.x, 8, c.z);
+        const light = new THREE.PointLight(0xffd700, 1, 100);
+        c.mesh.add(light);
+        scene.add(c.mesh);
+        cheeseObjects.push(c);
+        updateUI();
+    }
+    
+    function removeCheese() {
+        if (cheeseObjects.length > 0) {
+            const c = cheeseObjects.pop();
+            scene.remove(c.mesh);
+            updateUI();
+        }
+    }
+
+    function createEyeball(x, z, isAwake, roleId) {
+        const eyeGroup = new THREE.Group(); eyeGroup.position.set(x, 15, z);
+        const base = new THREE.Mesh(new THREE.SphereGeometry(15, 32, 32), whiteEyeMat); eyeGroup.add(base);
+        const pupilGroup = new THREE.Group();
+        const iris = new THREE.Mesh(new THREE.SphereGeometry(8, 32, 32), blueIrisMat); iris.position.z = 10; 
+        const pupil = new THREE.Mesh(new THREE.SphereGeometry(4, 32, 32), blackPupilMat); pupil.position.z = 15; 
+        pupilGroup.add(iris); pupilGroup.add(pupil); eyeGroup.add(pupilGroup);
+        const aura = new THREE.Mesh(new THREE.RingGeometry(75, 80, 32), auraMat);
+        aura.rotation.x = -Math.PI / 2; aura.position.y = -14; aura.visible = isAwake; eyeGroup.add(aura);
+        pupilGroup.visible = isAwake; scene.add(eyeGroup);
+        return {
+            group: eyeGroup, pupilGroup: pupilGroup, auraMesh: aura,
+            x: x, z: z, r: 15, speed: 2.1, auraR: 80, aggro: isAwake, role: roleId
+        };
+    }
+
+    function initGame() {
+        // Clear old items if restarting
+        cheeseObjects.forEach(c => scene.remove(c.mesh));
+        eyeballs.forEach(e => scene.remove(e.group));
+        cheeseObjects = [];
+        eyeballs = [];
+
+        // Reset Player
+        player.mesh.position.set(0, 12, -BOUND + 50);
+        player.mesh.material.color.setHex(0xaaaaaa);
+        player.lives = 5; player.isGlitching = false;
+        cheesesCollected = 0;
+        
+        // Spawn Target Cheese
+        for(let i=0; i<totalCheesesToSpawn; i++) spawnCheese();
+
+        // Spawn Eyes
+        eyeballs.push(createEyeball(0, -BOUND + 150, true, 2)); // Sentry
+        for (let i = 0; i < 40; i++) {
+            let ex, ez, valid = false;
+            while (!valid) {
+                ex = (Math.random() - 0.5) * (FIELD_SIZE - 60);
+                ez = (Math.random() - 0.5) * (FIELD_SIZE - 60);
+                if (Math.hypot(ex - 0, ez - (-BOUND + 50)) > 150) valid = true; 
+            }
+            eyeballs.push(createEyeball(ex, ez, false, i % 3));
+        }
+
+        // Reset UI & State
+        document.getElementById("start-screen").style.display = "none";
+        document.getElementById("end-screen").style.display = "none";
+        document.getElementById("ui-container").style.display = "flex";
+        
+        startTime = Date.now();
+        gameState = "PLAYING";
+        updateUI();
+    }
+
+    // --- UI & SCORING ---
+    function updateUI() {
+        document.getElementById("lives-display").innerText = player.lives;
+        document.getElementById("target-cheese-display").innerText = totalCheesesToSpawn;
+        
+        let remaining = totalCheesesToSpawn - cheesesCollected;
+        let statusObj = document.getElementById("status-display");
+        
+        if (remaining <= 0) {
+            statusObj.innerText = "ALL CHEESE SECURED! ESCAPE!";
+            statusObj.style.color = "#FFD700";
+            player.mesh.material.color.setHex(0xffd700); 
+        } else {
+            statusObj.innerText = `Find ${remaining} more cheese!`;
+            statusObj.style.color = "#aaa";
+        }
+    }
+
+    function endGame(win) {
+        gameState = win ? "WIN" : "GAME_OVER";
+        
+        let timeElapsed = Math.floor((Date.now() - startTime) / 1000);
+        let base = cheesesCollected * 500;
+        let livesBonus = player.lives * 1000;
+        let timePenalty = timeElapsed * 5;
+        let finalScore = Math.max(0, base + livesBonus - timePenalty);
+        if (!win) finalScore = Math.floor(finalScore / 2);
+        
+        document.getElementById("ui-container").style.display = "none";
+        document.getElementById("end-screen").style.display = "flex";
+        document.getElementById("end-title").innerText = win ? "YOU ESCAPED!" : "GAME OVER";
+        document.getElementById("end-title").style.color = win ? "#00ff00" : "#ff0000";
+        document.getElementById("end-score").innerText = `Final Score: ${finalScore}`;
+    }
+
+    // --- CONTROLS ---
+    window.addEventListener("keydown", (e) => {
+        let key = e.key.toLowerCase();
+        if(key === 'w') keys.w = true; 
+        if(key === 'a') keys.a = true;
+        if(key === 's') keys.s = true; 
+        if(key === 'd') keys.d = true;
+
+        // Enter to Start / Restart
+        if (e.key === 'Enter') {
+            if (gameState === "START" || gameState === "GAME_OVER" || gameState === "WIN") {
+                initGame();
+            }
+        }
+    });
+    
+    window.addEventListener("keyup", (e) => {
+        let key = e.key.toLowerCase();
+        if(key === 'w') keys.w = false; 
+        if(key === 'a') keys.a = false;
+        if(key === 's') keys.s = false; 
+        if(key === 'd') keys.d = false;
+    });
+    
+    document.getElementById('btn-add').addEventListener('click', () => {
+        totalCheesesToSpawn++; 
+        if(gameState === "PLAYING") spawnCheese();
+        else updateUI();
+    });
+    
+    document.getElementById('btn-sub').addEventListener('click', () => {
+        if (totalCheesesToSpawn > 1) {
+            totalCheesesToSpawn--; 
+            if(gameState === "PLAYING") removeCheese();
+            else updateUI();
+        }
+    });
+
+    // --- MAIN RENDER LOOP ---
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // Only process game logic if playing
+        if (gameState === "PLAYING") {
+            let timeElapsed = Math.floor((Date.now() - startTime) / 1000);
+            document.getElementById("time-display").innerText = timeElapsed;
+
+            // Animate Cheese
+            cheeseObjects.forEach(c => {
+                c.mesh.rotation.y += 0.02; c.mesh.rotation.x += 0.01;
+            });
+
+            // Player Movement
+            let dx = 0, dz = 0;
+            if (keys.w) dz -= 1; if (keys.s) dz += 1;
+            if (keys.a) dx -= 1; if (keys.d) dx += 1;
+            if (dx !== 0 && dz !== 0) { let len = Math.hypot(dx, dz); dx /= len; dz /= len; }
+
+            player.dirX = dx; player.dirZ = dz;
+            let px = player.mesh.position.x + dx * player.speed;
+            let pz = player.mesh.position.z + dz * player.speed;
+
+            // Boundaries
+            if (px < -BOUND + player.r) px = -BOUND + player.r;
+            if (px > BOUND - player.r) px = BOUND - player.r;
+            if (pz > BOUND - player.r) pz = BOUND - player.r;
+
+            let allCollected = (cheesesCollected >= totalCheesesToSpawn);
+            if (pz < -BOUND + player.r) {
+                if (px > -OPENING_WIDTH/2 && px < OPENING_WIDTH/2) {
+                    if (allCollected && pz < -BOUND) endGame(true);
+                    else if (!allCollected) pz = -BOUND + player.r; 
+                } else { pz = -BOUND + player.r; }
+            }
+            player.mesh.position.set(px, 12, pz);
+
+            // Cheese Collection
+            for (let i = cheeseObjects.length - 1; i >= 0; i--) {
+                let c = cheeseObjects[i];
+                if (Math.hypot(px - c.x, pz - c.z) < player.r + c.r) {
+                    scene.remove(c.mesh);
+                    cheeseObjects.splice(i, 1);
+                    cheesesCollected++;
+                    updateUI();
+                    
+                    // Panic wake-up
+                    eyeballs.forEach(eye => {
+                        if (!eye.aggro && Math.random() < 0.25) {
+                            eye.aggro = true; eye.pupilGroup.visible = true; eye.auraMesh.visible = true;
+                        }
+                    });
+                }
+            }
+
+            // Glitch I-Frames
+            if (player.isGlitching) {
+                player.glitchTimer--;
+                player.mesh.visible = (player.glitchTimer % 10 < 5);
+                if (player.glitchTimer <= 0) { player.isGlitching = false; player.mesh.visible = true; }
+            }
+
+            // Eyeball AI
+            for (let i = 0; i < eyeballs.length; i++) {
+                let eye = eyeballs[i];
+                let dist = Math.hypot(px - eye.x, pz - eye.z);
+
+                if (dist < player.r + eye.r) {
+                    if (!eye.aggro) {
+                        eye.aggro = true; eye.pupilGroup.visible = true; eye.auraMesh.visible = true;
+                    } else if (!player.isGlitching) {
+                        player.lives--; player.isGlitching = true; player.glitchTimer = 90; 
+                        updateUI();
+                        if (player.lives <= 0) endGame(false);
+                    }
+                }
+
+                if (eye.aggro) {
+                    let targetX = px, targetZ = pz;
+                    if (eye.role === 1) { targetX = px + (player.dirX * 120); targetZ = pz + (player.dirZ * 120); } 
+                    else if (eye.role === 2) { targetX = px * 0.5; targetZ = pz - 80; }
+
+                    let vx = targetX - eye.x, vz = targetZ - eye.z;
+                    let len = Math.hypot(vx, vz);
+                    if (len > 0) { vx = (vx / len) * eye.speed; vz = (vz / len) * eye.speed; }
+
+                    let sepX = 0, sepZ = 0;
+                    for (let j = 0; j < eyeballs.length; j++) {
+                        if (i !== j && eyeballs[j].aggro) {
+                            let other = eyeballs[j];
+                            let d = Math.hypot(eye.x - other.x, eye.z - other.z);
+                            if (d < 35 && d > 0) { sepX += (eye.x - other.x) / d; sepZ += (eye.z - other.z) / d; }
+                        }
+                    }
+
+                    eye.x += vx + sepX; eye.z += vz + sepZ;
+                    
+                    if (eye.x < -BOUND + eye.r) eye.x = -BOUND + eye.r;
+                    if (eye.x > BOUND - eye.r) eye.x = BOUND - eye.r;
+                    if (eye.z > BOUND - eye.r) eye.z = BOUND - eye.r;
+                    if (eye.z < -BOUND + eye.r) eye.z = -BOUND + eye.r;
+
+                    eye.group.position.set(eye.x, 15, eye.z);
+                    eye.group.lookAt(player.mesh.position);
+
+                    for (let j = 0; j < eyeballs.length; j++) {
+                        if (i !== j && !eyeballs[j].aggro) {
+                            let other = eyeballs[j];
+                            if (Math.hypot(eye.x - other.x, eye.z - other.z) < eye.auraR) {
+                                other.aggro = true; other.pupilGroup.visible = true; other.auraMesh.visible = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Always render the scene so it doesn't stay black on the Start Menu
+        renderer.render(scene, camera);
+    }
+
+    // Start the render loop immediately
+    animate();
+
+</script>
+</body>
+</html>
